@@ -13,11 +13,15 @@ LCN, EPFL - October 2009
 #import pdb
 # pdb.set_trace()
 
+import sys
+sys.path.insert(0, "/gpfs/bbp.cscs.ch/home/ebmuller/venv/nest-2.10.0/lib64/python2.6/site-packages")
+
+
 ## Import modules ##
 import numpy, pylab, math, time, os, re
-#import pyNN.nest as sim
+import pyNN.nest as sim
 from mpi4py import MPI
-import pyNN.neuron as sim
+#import pyNN.neuron as sim
 import pyNN.common as common
 import pyNN.connectors as connectors
 import pyNN.space as space
@@ -54,9 +58,10 @@ class LatticeConnector(connectors.Connector):
                           distribution).
         `n`            -- Number of connections to make for each neuron.
         """
-        connectors.Connector.__init__(self, weights, dist_factor*1.0)
+        connectors.Connector.__init__(self)
         self.dist_factor = dist_factor
         self.noise_factor = noise_factor
+        self.weights = weights
         self.n = n
         
     def connect(self, projection):
@@ -91,13 +96,14 @@ class LatticeConnector(connectors.Connector):
         listPostIndexes = map(projection.post.id_to_index, listPostIDs)
 
         # Prepare all distances #
-        allDistances = self.space.distances(projection.post.positions,projection.pre.positions)            
+        #allDistances = self.space.distances(projection.post.positions,projection.pre.positions)            
+        distance_map = self._generate_distance_map(projection)
         
         # Get weights #
         weights = numpy.empty(n)
         weights[:] = self.weights
-        is_conductance = common.is_conductance(projection.post[listPostIndexes[0]])
-        weights = common.check_weight(weights, projection.synapse_type, is_conductance)
+        #is_conductance = common.is_conductance(projection.post[listPostIndexes[0]])
+        #weights = common.check_weight(weights, projection.synapse_type, is_conductance)
 
         numpy.random.seed(12345)
         
@@ -118,7 +124,7 @@ class LatticeConnector(connectors.Connector):
             # Get distances
             myTimer = time.time()
             #distances = allDistances[currentPostIndex,chosenPresIndexes]
-            distances = allDistances[currentPostIndex,chosenPresIndexes]
+            distances = distance_map[chosenPresIndexes, currentPostIndex]
             timer1 += time.time() - myTimer
                         
             # Generate gamme noise
@@ -141,7 +147,9 @@ class LatticeConnector(connectors.Connector):
                 
             # Connect everything up
             yTimer = time.time()
-            projection._convergent_connect(chosenPresIDs, currentPostID, weights, delaysClipped)
+            #projection._convergent_connect(chosenPresIDs, currentPostID, weights, delaysClipped)
+            projection._convergent_connect(numpy.array(chosenPresIndexes), currentPostIndex, weight=weights, delay=delaysClipped)
+            #projection.set(weight=weights, delay=delaysClipped)
             timer4 += time.time() - myTimer
             
         
@@ -195,7 +203,7 @@ dt = 0.1 # simulation time step in milliseconds
 tinit = 500.0 # simtime over which the network is allowed to settle down
 tsim = 2000.0 # total simulation length in milliseconds
 globalWeight = 0.002 # Weights of all connection in uS
-latticeSize = 8 # number of neurons on one side of the cube
+latticeSize = 10 # number of neurons on one side of the cube
 propOfI = 0.2 # proportion of neurons that are inhibitory
 
 ## Connections ##
@@ -210,7 +218,7 @@ connectionsE_I = 1000.0 # number of E connections every I neuron recieves
 connectionsI_E = 250.0 # number of I connections every E neuron recieves
 connectionsI_I = 250.0 # number of I connections every E neuron recieves
 # Proportion of connections coming from inside #
-ICFactorE_E = 0.12 # proportion of E connections every E neuron recieves that will be converted
+ICFactorE_E = 0.2 # proportion of E connections every E neuron recieves that will be converted
 ICFactorE_I = 0.2 # proportion of E connections every I neuron recieves that will be converted
 ICFactorI_E = 0.2 # proportion of I connections every E neuron recieves that will be converted
 ICFactorI_I = 0.2 # proportion of I connections every E neuron recieves that will be converted
@@ -319,17 +327,23 @@ seeds = MPI.COMM_WORLD.bcast(seeds)
 
 #nest.SetKernelStatus({'rng_seeds': list(seeds)})
 
-myconn = sim.OneToOneConnector(weights=globalWeight, delays=dt)
+myconn = sim.OneToOneConnector()
 
-prjE_E = sim.Projection(poissonE_E, popE, method=myconn, target='excitatory')
-prjE_I = sim.Projection(poissonE_I, popI, method=myconn, target='excitatory')
+prjE_E = sim.Projection(poissonE_E, popE, connector=myconn, receptor_type='excitatory')
+prjE_E.set(weight=globalWeight, delay=dt)
 
-prjI_E = sim.Projection(poissonI_E, popE, method=myconn, target='inhibitory')
-prjI_I = sim.Projection(poissonI_I, popI, method=myconn, target='inhibitory')
+prjE_I = sim.Projection(poissonE_I, popI, connector=myconn, receptor_type='excitatory')
+prjE_I.set(weight=globalWeight, delay=dt)
+
+prjI_E = sim.Projection(poissonI_E, popE, connector=myconn, receptor_type='inhibitory')
+prjI_E.set(weight=globalWeight, delay=dt)
+
+prjI_I = sim.Projection(poissonI_I, popI, connector=myconn, receptor_type='inhibitory')
+prjI_I.set(weight=globalWeight, delay=dt)
 
 ## Record the spikes ##
-popE.record(to_file=False)
-popI.record(to_file=False)
+popE.record("spikes")
+popI.record("spikes")
 printTimer("Time for setup part")
 
 
@@ -360,19 +374,19 @@ myConnectorI_I = LatticeConnector(weights=globalWeight, dist_factor=distanceFact
                                   noise_factor=noiseFactor, n=NumOfConI_I)
 # Execute the projections #
 printMessage("Now changing E_E connections for " + str(NumOfConE_E)+ " new connections")
-prjLatticeE_E = sim.Projection(popE, popE, method=myConnectorE_E, target='excitatory')
+prjLatticeE_E = sim.Projection(popE, popE, connector=myConnectorE_E, receptor_type='excitatory')
 printTimer("Time for E_E connections")
 
 printMessage("Now changing E_I connections for " + str(NumOfConE_I)+ " new connections")
-prjLatticeE_I = sim.Projection(popE, popI, method=myConnectorE_I, target='excitatory')
+prjLatticeE_I = sim.Projection(popE, popI, connector=myConnectorE_I, receptor_type='excitatory')
 printTimer("Time for E_I connections")
 
 printMessage("Now changing I_E connections for " + str(NumOfConI_E)+ " new connections")
-prjLatticeI_E = sim.Projection(popI, popE, method=myConnectorI_E, target='inhibitory')
+prjLatticeI_E = sim.Projection(popI, popE, connector=myConnectorI_E, receptor_type='inhibitory')
 printTimer("Time for I_E connections")
 
 printMessage("Now changing I_I connections for " + str(NumOfConI_I)+ " new connections")
-prjLatticeI_I = sim.Projection(popI, popI, method=myConnectorI_I, target='inhibitory')
+prjLatticeI_I = sim.Projection(popI, popI, connector=myConnectorI_I, receptor_type='inhibitory')
 printTimer("Time for I_I connections")
 
 ## Run the simulation once lattice is inter-connected ##
@@ -386,17 +400,14 @@ printMessage("Now creating graph.")
 time.sleep(2)
 
 ## Get spikes ##
-spikesE = popE.getSpikes()
-popE.printSpikes('spikes.dat')
-spikesI = popI.getSpikes()
+#popE.write_data('spikesE.h5')
+#popI.write_data('spikesI.h5')
+
+## Close the simulation ##
+sim.end()
+
 
 ## Process them ##
-if rank==0:
-    highestIndexE = numpy.max(spikesE[:,0])
-    listNeuronsE = list(spikesE[:,0])
-    listTimesE = list(spikesE[:,1])
-    listNeuronsI = list(spikesI[:,0] + highestIndexE) 
-    listTimesI = list(spikesI[:,1])
 
 ## Kill the bad dir ##
 #print("Tempdir: ", sim.tempdirs)
@@ -408,18 +419,24 @@ if rank==0:
 #theFD = m.group(1)
 #os.close(int(theFD))
     
-## Close the simulation ##
-sim.end()
 
 
 ###################### PLOTTING ###########################
 if rank==0:
+
+    spiketrainsE = popE.get_data().segments[0].spiketrains
+    indicesE = [x.annotations['source_index'] for x in spiketrainsE]
+
+    spiketrainsI = popI.get_data().segments[0].spiketrains
+    indicesI = [x.annotations['source_index'] for x in spiketrainsI]
+
     
 ## Graph Burst ##
     pylab.figure()
-    allSpikes = listTimesE+listTimesI
-    allNeurons = listNeuronsE+listNeuronsI
-    pylab.plot(allSpikes,allNeurons,'r.',markersize=1,label='Action potentials')
+    for st, idx in zip(spiketrainsE, indicesE):
+        pylab.plot(numpy.array(st),len(st)*[idx],'r.',markersize=1,label='Exc action potentials')
+    for st, idx in zip(spiketrainsI, indicesI):
+        pylab.plot(numpy.array(st),len(st)*[idx+len(indicesE)],'b.',markersize=1,label='Inh action potentials')
     
     pylab.xlabel("Time [milliseconds]")
     pylab.ylabel("Neuron (first E, then I)")
